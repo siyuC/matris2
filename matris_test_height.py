@@ -1,0 +1,527 @@
+#!/usr/bin/env python
+import pygame
+from pygame import Rect, Surface
+import random
+# import os
+# import kezmenu
+
+from tetrominoes import list_of_tetrominoes
+from tetrominoes import rotate
+import numpy as np
+from scores import load_score, write_score
+
+class BrokenMatrixException(Exception):
+    pass
+
+
+# def get_sound(filename):
+#     return pygame.mixer.Sound(os.path.join(os.path.dirname(__file__), "resources", filename))
+
+BGCOLOR = (0, 0, 0)
+BORDERCOLOR = (140, 140, 140)
+
+BLOCKSIZE = 30
+BORDERWIDTH = 10
+
+MATRIS_OFFSET = 20
+
+WIDTH = 700
+HEIGHT = 20*BLOCKSIZE + BORDERWIDTH*2 + MATRIS_OFFSET*2
+
+MATRIX_WIDTH = 10
+MATRIX_HEIGHT = 22
+VISIBLE_MATRIX_HEIGHT = MATRIX_HEIGHT - 2
+
+
+class Matris(object):
+    def __init__(self, size=(MATRIX_WIDTH, MATRIX_HEIGHT), blocksize=BLOCKSIZE):
+        self.size = {'width': size[0], 'height': size[1]}
+        self.blocksize = blocksize
+        self.surface = Surface((self.size['width']  * self.blocksize,
+                                (self.size['height']-2) * self.blocksize))
+
+
+        self.matrix = dict()
+        for y in range(self.size['height']):
+            for x in range(self.size['width']):
+                self.matrix[(y,x)] = None
+
+
+        self.next_tetromino = random.choice(list_of_tetrominoes)
+        self.set_tetrominoes()
+        self.tetromino_rotation = 0
+        self.downwards_timer = 0
+        self.base_downwards_speed = 0.4 # Move down every 400 ms
+
+        self.movement_keys = {'left': 0, 'right': 0}
+        self.movement_keys_speed = 0.05
+        self.movement_keys_timer = (-self.movement_keys_speed)*2
+
+        self.level = 1
+        self.score = 0
+        self.lines = 0
+
+        self.combo = 1 # Combo will increase when you clear lines with several tetrominos in a row
+        
+        self.paused = False
+        self.gameover = False
+
+        self.highscore = load_score()
+
+        self.action_space = []
+        for i in range(4):
+            for j in range(-5,7):
+                self.action_space.append([i,j])
+        # self.played_highscorebeaten_sound = False
+
+        # self.levelup_sound  = get_sound("levelup.wav")
+        # self.gameover_sound = get_sound("gameover.wav")
+        # self.linescleared_sound = get_sound("linecleared.wav")
+        # self.highscorebeaten_sound = get_sound("highscorebeaten.wav")
+
+
+    def set_tetrominoes(self):
+        self.current_tetromino = self.next_tetromino
+        self.next_tetromino = random.choice(list_of_tetrominoes)
+        self.surface_of_next_tetromino = self.construct_surface_of_next_tetromino()
+        self.tetromino_position = (0,4) if len(self.current_tetromino.shape) == 2 else (0, 3)
+        self.tetromino_rotation = 0
+        self.tetromino_block = self.block(self.current_tetromino.color)
+        #self.shadow_block = self.block(self.current_tetromino.color, shadow=True)
+
+    
+    def hard_drop(self):
+        amount = 0
+        while self.request_movement('down'):
+            amount += 1
+
+        self.lock_tetromino()
+        self.score += 10*amount
+
+    def update(self, timepassed, action):
+        # pressed = lambda key: event.type == pygame.KEYDOWN and event.key == key
+        # unpressed = lambda key: event.type == pygame.KEYUP and event.key == key
+        pre_lines = self.lines
+        pre_height = self.maxHeight()
+        ''' estimate validity of an action '''
+
+        if len(action)>2:
+            action = self.decode_action(action)
+
+        shape = self.rotated(rotation=action[0])
+        position_x = self.tetromino_position[1]+action[1]
+        if (self.fits_in_matrix(shape, (0,position_x)) == False) or (self.blend(shape, (0,position_x)) == False):
+            return False
+
+        ''' estimate validity of an action '''
+
+        events = pygame.event.get()
+        for i in range(action[0]):
+            self.request_rotation()
+        if action[1] < 0:
+            for i in range(-action[1]):
+                self.request_movement('left')
+                self.movement_keys['left'] = 0
+            self.movement_keys_timer = (-self.movement_keys_speed)*2
+        elif action[1] > 0:
+            for i in range(action[1]):
+                self.request_movement('right')
+                self.movement_keys['right'] = 0
+            self.movement_keys_timer = (-self.movement_keys_speed)*2
+
+        self.hard_drop()
+
+        self.downwards_speed = self.base_downwards_speed ** (1 + 1/10.)
+
+        self.downwards_timer += timepassed
+        downwards_speed = self.downwards_speed
+
+        try:
+            with_tetromino = self.blend(self.rotated(), allow_failure=False) #, matrix=with_shadow)
+            # if type(with_tetromino) == bool:
+            #     self.prepare_and_execute_gameover()
+            #     return
+        except BrokenMatrixException:
+            self.prepare_and_execute_gameover()
+            image_data = pygame.surfarray.array3d(self.surface)
+            # score = - 0.510066 * self.aggregateHeight(self.matrix)[0] +  0.760666 * self.clines(self.matrix) -  0.35663 * self.Holes(self.matrix) -  0.184483 * self.bumpness(self.matrix)
+            return image_data, self.gameover, pre_height - self.maxHeight()
+
+
+        for y in range(self.size['height']):
+            for x in range(self.size['width']):
+
+                #                                       I hide the 2 first rows by drawing them outside of the surface
+                block_location = Rect(x*self.blocksize, (y*self.blocksize - 2*self.blocksize), self.blocksize, self.blocksize)
+                if with_tetromino[(y,x)] is None:
+                    self.surface.fill(BGCOLOR, block_location)
+                else:
+                    if with_tetromino[(y,x)][0] == 'shadow':
+                        self.surface.fill(BGCOLOR, block_location)
+                    
+                    self.surface.blit(with_tetromino[(y,x)][1], block_location)
+        image_data = pygame.surfarray.array3d(self.surface)
+        # score = - 0.510066 * self.aggregateHeight(self.matrix)[0] +  0.760666 * self.clines(self.matrix) -  0.35663 * self.Holes(self.matrix) -  0.184483 * self.bumpness(self.matrix)
+        return image_data, self.gameover, pre_height - self.maxHeight()
+
+    def encode_action(self, action): # [2, -1] -> [0...1...0]
+        a = np.zeros(len(self.action_space))
+        loc = self.action_space.index(action)
+        a[loc] = 1
+        return a
+
+    def decode_action(self, action): # [0...1...0] -> [2, -1]
+        loc = list(action).index(1)
+        return self.action_space[loc]
+
+                    
+    def prepare_and_execute_gameover(self, playsound=False):
+        if playsound:
+            self.gameover_sound.play()
+        write_score(self.score)
+        self.gameover = True
+
+
+    def fits_in_matrix(self, shape, position):
+        posY, posX = position
+        for x in range(posX, posX+len(shape)):
+            for y in range(posY, posY+len(shape)):
+                if self.matrix.get((y, x), False) is False and shape[y-posY][x-posX]: # outside matrix
+                    return False
+
+        return position
+                    
+
+    def request_rotation(self):
+        rotation = (self.tetromino_rotation + 1) % 4
+        shape = self.rotated(rotation)
+
+        y, x = self.tetromino_position
+
+        position = (self.fits_in_matrix(shape, (y, x)) or
+                    self.fits_in_matrix(shape, (y, x+1)) or
+                    self.fits_in_matrix(shape, (y, x-1)) or
+                    self.fits_in_matrix(shape, (y, x+2)) or
+                    self.fits_in_matrix(shape, (y, x-2)))
+        # ^ Thats how wall-kick is implemented
+
+        if position and self.blend(shape, position):
+            self.tetromino_rotation = rotation
+            self.tetromino_position = position
+            return self.tetromino_rotation
+        else:
+            return False
+            
+    def request_movement(self, direction):
+        posY, posX = self.tetromino_position
+        if direction == 'left' and self.blend(position=(posY, posX-1)):
+            self.tetromino_position = (posY, posX-1)
+            return self.tetromino_position
+        elif direction == 'right' and self.blend(position=(posY, posX+1)):
+            self.tetromino_position = (posY, posX+1)
+            return self.tetromino_position
+        elif direction == 'up' and self.blend(position=(posY-1, posX)):
+            self.tetromino_position = (posY-1, posX)
+            return self.tetromino_position
+        elif direction == 'down' and self.blend(position=(posY+1, posX)):
+            self.tetromino_position = (posY+1, posX)
+            return self.tetromino_position
+        else:
+            return False
+
+    def rotated(self, rotation=None):
+        if rotation is None:
+            rotation = self.tetromino_rotation
+        return rotate(self.current_tetromino.shape, rotation)
+
+    def block(self, color, shadow=False):
+        colors = {'blue':   (27, 34, 224),
+                  'yellow': (225, 242, 41),
+                  'pink':   (242, 41, 195),
+                  'green':  (22, 181, 64),
+                  'red':    (204, 22, 22),
+                  'orange': (245, 144, 12),
+                  'cyan':   (10, 255, 226)}
+
+
+        if shadow:
+            end = [40] # end is the alpha value
+        else:
+            end = [] # Adding this to the end will not change the array, thus no alpha value
+
+        border = Surface((self.blocksize, self.blocksize), pygame.SRCALPHA, 32)
+        border.fill(map(lambda c: c*0.5, colors[color]) + end)
+
+        borderwidth = 2
+
+        box = Surface((self.blocksize-borderwidth*2, self.blocksize-borderwidth*2), pygame.SRCALPHA, 32)
+        boxarr = pygame.PixelArray(box)
+        for x in range(len(boxarr)):
+            for y in range(len(boxarr)):
+                boxarr[x][y] = tuple(map(lambda c: min(255, int(c*random.uniform(0.8, 1.2))), colors[color]) + end) 
+
+        del boxarr # deleting boxarr or else the box surface will be 'locked' or something like that and won't blit.
+        border.blit(box, Rect(borderwidth, borderwidth, 0, 0))
+
+
+        return border
+
+    def lock_tetromino(self):
+
+        self.matrix = self.blend()
+
+        lines_cleared = self.remove_lines()
+        self.lines += lines_cleared
+
+        if lines_cleared:
+            # if lines_cleared >= 4:
+            #     self.linescleared_sound.play()
+            self.score += 100 * (lines_cleared**2) * self.combo
+
+            # if not self.played_highscorebeaten_sound and self.score > self.highscore:
+            #     if self.highscore != 0:
+            #         self.highscorebeaten_sound.play()
+            #     self.played_highscorebeaten_sound = True
+
+        if self.lines >= self.level*10:
+            # self.levelup_sound.play()
+            self.level += 1
+
+        self.combo = self.combo + 1 if lines_cleared else 1
+
+        self.set_tetrominoes()
+
+    def remove_lines(self):
+        lines = []
+        for y in range(self.size['height']):
+            line = (y, [])
+            for x in range(self.size['width']):
+                # if type(self.matrix) == bool:
+                #     self.prepare_and_execute_gameover()
+                #     return len(lines)
+                # else:
+                if self.matrix[(y,x)]:
+                    line[1].append(x)
+            if len(line[1]) == self.size['width']:
+                lines.append(y)
+
+        # remove lines
+        for line in sorted(lines):
+            for x in range(self.size['width']):
+                self.matrix[(line,x)] = None
+            for y in range(0, line+1)[::-1]:
+                for x in range(self.size['width']):
+                    self.matrix[(y,x)] = self.matrix.get((y-1,x), None)
+
+        return len(lines)
+
+    def blend(self, shape=None, position=None, matrix=None, block=None, allow_failure=True, shadow=False):
+        # if type(self.matrix) == bool:
+        #     return False
+        if shape is None:
+            shape = self.rotated()
+        if position is None:
+            position = self.tetromino_position
+
+        copy = dict(self.matrix if matrix is None else matrix)
+        # self.blendrecord=[]
+        # for x in range(self.size['width']):
+        #     for y in range(self.size['height']):
+        #         if copy[(y,x)] != None:
+        #             self.blendrecord.append([y,x])
+        posY, posX = position
+        for x in range(posX, posX+len(shape)):
+            for y in range(posY, posY+len(shape)):
+                if ((copy.get((y, x), False) is False and shape[y-posY][x-posX]) # shape is outside the matrix
+                    or # coordinate is occupied by something else which isn't a shadow
+                    (copy.get((y,x)) and shape[y-posY][x-posX])): 
+                    if allow_failure:
+                        return False
+                    else:
+                        raise BrokenMatrixException("Tried to blend a broken matrix. This should mean game over, if you see this it is certainly a bug. (or you are developing)")
+                elif shape[y-posY][x-posX]:
+                    copy[(y,x)] = ('block', self.tetromino_block if block is None else block)
+                # elif shape[y-posY][x-posX] and shadow:
+                #     copy[(y,x)] = ('shadow', block)
+
+        return copy
+
+##############################################################################
+##############################################################################
+    def Holes(self, fake_matrix):
+        count = 0
+        # start = len(self.current_tetromino.shape) + 1
+        for x in range(self.size['width']):
+            block = False
+            for y in range(self.size['height']):
+                if fake_matrix[(y,x)] != None:
+                    block = True
+                elif (fake_matrix[(y,x)] == None) & (block):
+                    count += 1
+        return count
+
+    def columnHeight(self, fake_matrix, column):
+        h = 0
+        # start = len(self.current_tetromino.shape) + 1
+        for h in range(self.size['height']):
+            if fake_matrix[(h,column)] != None:
+                return self.size['height'] - h
+        return 0
+
+    def maxHeight(self, matrix = None):
+        if matrix == None:
+            matrix = self.matrix
+        if matrix == None:
+            return 0
+        maxh = 0
+        for x in range(self.size['width']):
+            if self.columnHeight(matrix, x) > maxh:
+                maxh = self.columnHeight(matrix, x)
+        return maxh
+
+    def aggregateHeight(self, fake_matrix):
+        total = 0
+        test = []
+        for x in range(self.size['width']):
+            total += self.columnHeight(fake_matrix, x)
+            test.append(self.columnHeight(fake_matrix, x))
+        return total,test
+
+    def bumpness(self, fake_matrix):
+        total = 0
+        for x in range(self.size['width'] - 1):
+            total += abs(self.columnHeight(fake_matrix, x) - self.columnHeight(fake_matrix, x+1))
+        return total
+
+    def clines(self, fake_matrix):
+        lines = 0
+        for y in range(self.size['height']):
+            l = True
+            for x in range(self.size['width']):
+                if fake_matrix[(y,x)] == None:
+                    l = False
+                    break
+            if l == True:
+                lines += 1
+        return lines
+
+    def choose_action(self):
+        bestscore = -float('inf')
+        action = [0, 0]
+        for rot in range(4):
+            shape = self.rotated(rotation=rot)
+            self.tetromino_position = (0,4) if len(self.current_tetromino.shape) == 2 else (0, 3)
+            x = self.tetromino_position[1]
+            i = 0
+            while self.fits_in_matrix(shape, (0,x-i)) and self.blend(shape, (0,x-i)):
+                x0 = x-i
+                for y in range(self.size['height']):
+                    if self.blend(shape,position=(y+1, x0)) == False:
+                        break
+                self.tetromino_position = (y, x0)
+                fake_matrix = self.blend(shape)
+                score = - 0.510066 * self.aggregateHeight(fake_matrix)[0] +  0.760666 * self.clines(fake_matrix) -  0.35663 * self.Holes(fake_matrix) -  0.184483 * self.bumpness(fake_matrix)
+                record = [shape,score,(rot,x0),self.tetromino_position,self.aggregateHeight(fake_matrix),self.clines(fake_matrix),self.Holes(fake_matrix),self.bumpness(fake_matrix)]
+                # print record
+                if score > bestscore:
+                    bestscore = score
+                    action = [rot,-i]
+                    ma = fake_matrix
+                i += 1
+                self.tetromino_position = (0,x0)
+
+            j = 0
+            while self.fits_in_matrix(shape, (0,x+j)) and self.blend(shape, (0,x+j)):
+                x0 = x+j
+                for y in range(self.size['height']):
+                    if self.blend(shape,position=(y+1, x0)) == False:
+                        break
+                self.tetromino_position = (y, x0)
+                # print self.blendrecord
+                fake_matrix = self.blend(shape,self.tetromino_position)
+                score = - 0.510066 * self.aggregateHeight(fake_matrix)[0] +  0.760666 * self.clines(fake_matrix) -  0.35663 * self.Holes(fake_matrix) -  0.184483 * self.bumpness(fake_matrix)
+                record = [shape,score,(rot,x0),self.tetromino_position,self.aggregateHeight(fake_matrix),self.clines(fake_matrix),self.Holes(fake_matrix),self.bumpness(fake_matrix)]
+                # print record
+                # print self.aggregateHeight(fake_matrix),self.clines(fake_matrix),self.Holes(fake_matrix),self.bumpness(fake_matrix)
+                if score > bestscore:
+                    bestscore = score
+                    action = [rot,j]
+                    ma = fake_matrix
+
+                j += 1
+                self.tetromino_position = (0,x0)
+        
+        self.tetromino_position = (0,4) if len(self.current_tetromino.shape) == 2 else (0, 3)
+
+        # print record
+        return action
+
+    def choose_action_dqn(self, readout_t, epsilon = 0):
+        while 1:
+            ACTIONS = 48 
+            a_t = np.zeros([ACTIONS])
+            if random.random() <= epsilon:
+                action_index = random.randrange(ACTIONS)
+                a_t[action_index] = 1
+            else:
+                action_index = np.argmax(readout_t)
+                a_t[action_index] = 1
+
+            action = self.decode_action(a_t)
+            shape = self.rotated(rotation=action[0])
+            x = self.tetromino_position[1]
+            if self.fits_in_matrix(shape, (0,x+action[1])) and self.blend(shape, (0,x+action[1])):
+                return a_t,readout_t
+            readout_t[np.argmax(readout_t)] = -float('inf')
+
+
+##############################################################################
+##############################################################################
+
+    def construct_surface_of_next_tetromino(self):
+        shape = self.next_tetromino.shape
+        surf = Surface((len(shape)*self.blocksize, len(shape)*self.blocksize), pygame.SRCALPHA, 32)
+
+        for y in range(len(shape)):
+            for x in range(len(shape)):
+                if shape[y][x]:
+                    surf.blit(self.block(self.next_tetromino.color), (x*self.blocksize, y*self.blocksize))
+        return surf
+
+class Game(object):
+    def main(self, screen):
+        background = Surface(screen.get_size())
+        self.matris = Matris()
+
+        while 1:
+            # clock = pygame.time.Clock()
+            # dt = clock.tick(45)
+            
+            # action = [0,-3]
+            events = pygame.event.get()
+            for event in events:
+                pressed = lambda key: event.type == pygame.KEYDOWN and event.key == key
+                if pressed(pygame.K_p):
+                    action = self.matris.choose_action()
+                    _, reward, terminal  = self.matris.update(0 , action)
+            # print reward
+
+            # state_batch.append(state)
+            if self.matris.gameover:
+                while True:
+                    events = pygame.event.get()
+                    for event in events:
+                        pressed = lambda key: event.type == pygame.KEYDOWN and event.key == key
+                        if pressed(pygame.K_p):
+                            return 
+
+            background.blit(self.matris.surface, (MATRIS_OFFSET+BORDERWIDTH, MATRIS_OFFSET+BORDERWIDTH))
+            screen.blit(background, (0, 0))
+            pygame.display.flip()
+
+if __name__ == '__main__':
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT),0,32)
+    # screen = pygame.Surface((WIDTH,HEIGHT))
+    pygame.display.set_caption("MaTris")
+    Game().main(screen)

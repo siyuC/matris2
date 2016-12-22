@@ -8,7 +8,7 @@ sys.path.append("Wrapped Game Code/")
 from collections import deque
 import random
 import numpy as np
-import matris_test
+import matris_test_height
 from replay_buffer import ReplayBuffer
 import pygame
 
@@ -115,7 +115,7 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
     # saving and loading networks
     saver = tf.train.Saver()
     sess.run(tf.initialize_all_variables())
-    checkpoint = tf.train.get_checkpoint_state("saved_networks/dqn_3")
+    checkpoint = tf.train.get_checkpoint_state("saved_networks/dqn_3_sreset")
     if checkpoint and checkpoint.model_checkpoint_path:
         saver.restore(sess, checkpoint.model_checkpoint_path)
         print "Successfully loaded:", checkpoint.model_checkpoint_path
@@ -123,7 +123,7 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
         print "Could not find old network weights"
 
     # open up a game state to communicate with emulator
-    game_state = matris_test.Matris()
+    game_state = matris_test_height.Matris()
     x_t = pygame.surfarray.array3d(game_state.surface)
     # x_t = cv2.cvtColor(cv2.resize(x_t, (80, 80)), cv2.COLOR_BGR2GRAY)
     # ret, x_t = cv2.threshold(x_t,1,255,cv2.THRESH_BINARY)
@@ -145,7 +145,7 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
             a_t, _ = game_state.choose_action_dqn(readout_t,epsilon)
             returns = game_state.update(0,a_t)
 
-            if returns[2] != 0:
+            if returns[2] > 0:
                 print 'Awesome!!! line reduced!!!',returns[2]
 
             # scale down epsilon
@@ -163,7 +163,6 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
 
         
 
-
         # store the transition in D
         D.append((s_t, a_t, r_t, s_t1, terminal))
         if len(D) > REPLAY_MEMORY:
@@ -174,10 +173,10 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
         t += 1
 
         if terminal:
-            game_state = matris_test.Matris()
+            game_state = matris_test_height.Matris()
             x_t = pygame.surfarray.array3d(game_state.surface)
             s_t = prepro(x_t)
-            
+
         # only train when the size is large enough
         if t > 1000:
             # sample a minibatch to train on
@@ -218,7 +217,7 @@ def trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_
 
         # save progress every 10000 iterations
         if t % 10000 == 0:
-            saver.save(sess, 'saved_networks/' + 'dqn_3/', global_step = t)
+            saver.save(sess, 'saved_networks/' + 'dqn_3_sreset/', global_step = t)
         # print info
         if (t % 1000 == 0) & (t>OBSERVE):
             print "TIMESTEP", t, "/ LINES", r_t, "/ EPSILON", epsilon, "/ Q_MAX %e" % np.max(readout_t), "/ action",game_state.decode_action(a_t)
@@ -245,14 +244,16 @@ def playGame():
     pygame.init()
     WIDTH = 700
     HEIGHT = 660
-    sess = tf.InteractiveSession()
-    s, readout, h_fc1 = createNetwork()
-    network_params = tf.trainable_variables()
-    s_target, readout_target, h_fc1_target = createNetwork()
-    target_network_params = tf.trainable_variables()[len(network_params):]
-    # screen = pygame.Surface((WIDTH,HEIGHT))
-    screen = pygame.display.set_mode((WIDTH, HEIGHT),0,32)
-    trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_fc1_target, target_network_params, sess, screen)
+    with tf.device('/gpu:4'):
+        config = tf.ConfigProto(allow_soft_placement = True)
+        sess = tf.InteractiveSession(config = config)
+        s, readout, h_fc1 = createNetwork()
+        network_params = tf.trainable_variables()
+        s_target, readout_target, h_fc1_target = createNetwork()
+        target_network_params = tf.trainable_variables()[len(network_params):]
+        # screen = pygame.Surface((WIDTH,HEIGHT))
+        screen = pygame.display.set_mode((WIDTH, HEIGHT),0,32)
+        trainNetwork(s, readout, h_fc1, network_params, s_target, readout_target, h_fc1_target, target_network_params, sess, screen)
 
 def main():
     playGame()
